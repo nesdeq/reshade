@@ -1,0 +1,4 @@
+rich>=13.0.0
+questionary>=2.0.0
+requests>=2.28.0
+pefile>=2023.2.7
