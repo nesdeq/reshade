@@ -1,39 +1,37 @@
 # ReShade Linux
 
-A revamped CLI tool for installing [ReShade](https://reshade.me) on Linux for Steam games running via Wine/Proton, comfortably.
+A CLI tool for installing [ReShade](https://reshade.me) on Linux for Steam games running via Wine/Proton.
 
 ![screenshot](screenshot.png)
 
 ## Features
 
-- **Automatic game detection** - Scans Steam libraries for installed games
-- **PE analysis** - Detects executable architecture (32/64-bit) and graphics API (DX9/10/11/12/OpenGL)
-- **Per-game configuration** - Saves settings so you don't re-enter paths
-- **Shader management** - Downloads and merges popular shader repositories
-- **One-command install** - Single script sets up everything
+- Automatic Steam library scanning and game detection
+- PE analysis for architecture (32/64-bit) and graphics API (DX8/9/10/11/12, OpenGL)
+- Per-game configuration persistence
+- Shader repository management with automatic merging
+- Addon support enabled by default
 
 ## Requirements
 
 - Python 3.10+
-- `git` - For cloning shader repositories
-- `7z` (p7zip) - For extracting ReShade
+- `git`
+- `7z` (p7zip)
 
-**Arch/Manjaro:**
+### Install dependencies
+
 ```bash
+# Arch/Manjaro
 sudo pacman -S python git p7zip
-```
 
-**Ubuntu/Debian:**
-```bash
+# Ubuntu/Debian
 sudo apt install python3 python3-venv git p7zip-full
-```
 
-**Fedora:**
-```bash
+# Fedora
 sudo dnf install python3 git p7zip
 ```
 
-## Installation
+## Install
 
 ```bash
 git clone https://github.com/nesdeq/reshade.git
@@ -41,7 +39,7 @@ cd reshade
 ./install.sh
 ```
 
-This installs to `~/.local/reshade` and creates the `reshade` command.
+Installs to `~/.local/reshade` and creates the `reshade` command in `~/.local/bin`.
 
 ## Usage
 
@@ -49,36 +47,21 @@ This installs to `~/.local/reshade` and creates the `reshade` command.
 reshade
 ```
 
-### Steam Launch Options
-
-After installing ReShade to a game, add this to Steam launch options:
+After installing ReShade to a game, set Steam launch options (right-click game > Properties > Launch Options):
 
 ```
 WINEDLLOVERRIDES="d3dcompiler_47=n;dxgi=n,b" %command%
 ```
 
-Replace `dxgi` with the DLL shown after installation (e.g., `d3d9` for DX9 games).
+Replace `dxgi` with the DLL shown after installation (e.g. `d3d9` for DX9 games).
 
-## Directory Structure
+## Custom shaders
 
-```
-~/.local/reshade/
-├── .venv/              # Python virtual environment
-├── reshade/            # ReShade binaries
-├── ReShade_shaders/    # Shader repositories
-│   └── Merged/         # Combined shaders (auto-configured in ReShade)
-├── External_shaders/   # Your custom shaders (add .fx files here)
-├── games.json          # Saved game configurations
-└── ReShade.ini         # Global ReShade config
-```
+Drop `.fx` files into `~/.local/reshade/External_shaders/` and run "Update shaders" from the menu.
 
-## Adding Custom Shaders
+## Shader repositories
 
-Drop `.fx` files into `~/.local/reshade/External_shaders/` and run `reshade` → "Update shaders" to merge them.
-
-## Included Shader Repositories
-
-- [reshade-shaders](https://github.com/crosire/reshade-shaders) (slim branch)
+- [reshade-shaders](https://github.com/crosire/reshade-shaders) (slim)
 - [SweetFX](https://github.com/CeeJayDK/SweetFX)
 - [qUINT](https://github.com/martymcmodding/qUINT)
 - [AstrayFX](https://github.com/BlueSkyDefender/AstrayFX)
@@ -86,11 +69,12 @@ Drop `.fx` files into `~/.local/reshade/External_shaders/` and run `reshade` →
 
 ## Uninstall
 
+Remove ReShade from games via the tool first, then:
+
 ```bash
-# Remove from a game first via the tool, then:
 rm -rf ~/.local/reshade ~/.local/bin/reshade
 ```
 
 ## License
 
-GPL-2.0 - Based on [reshade-steam-proton](https://github.com/kevinlekiller/reshade-steam-proton) by kevinlekiller.
+GPL-2.0 — Based on [reshade-steam-proton](https://github.com/kevinlekiller/reshade-steam-proton) by kevinlekiller.
