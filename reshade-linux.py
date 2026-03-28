@@ -191,7 +191,7 @@ class Config:
     """Application configuration."""
     main_path: Path = field(default_factory=lambda: Path.home() / ".local/reshade")
     reshade_version: str = "latest"
-    addon_support: bool = False
+    addon_support: bool = True
     merge_shaders: bool = True
     global_ini: str = "ReShade.ini"
 
