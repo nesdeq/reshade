@@ -19,15 +19,18 @@ set -e
 INSTALL_DIR="${HOME}/.local/reshade"
 BIN_DIR="${HOME}/.local/bin"
 VENV_DIR="${INSTALL_DIR}/.venv"
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-}")" 2>/dev/null && pwd || true)"
 PYTHON_SCRIPT="reshade-linux.py"
 WRAPPER_NAME="reshade"
+
+# Remote source for curl|bash bootstrap
+RAW_BASE="${RESHADE_RAW_BASE:-https://raw.githubusercontent.com/nesdeq/reshade/main}"
 
 # Python packages to install
 PYTHON_PACKAGES="rich questionary requests pefile"
 
 # Required system tools
-REQUIRED_TOOLS="python3 git 7z"
+REQUIRED_TOOLS="python3 git 7z curl"
 
 # Colors for output
 RED='\033[0;31m'
@@ -97,11 +100,6 @@ Please install it:
   Ubuntu/Debian: sudo apt install python3-venv"
     fi
 
-    # Check if the Python script exists
-    if [[ ! -f "${SCRIPT_DIR}/${PYTHON_SCRIPT}" ]]; then
-        error "Cannot find ${PYTHON_SCRIPT} in ${SCRIPT_DIR}"
-    fi
-
     success "All system requirements met"
 }
 
@@ -145,7 +143,13 @@ setup_venv() {
 install_script() {
     info "Installing ReShade script..."
 
-    cp "${SCRIPT_DIR}/${PYTHON_SCRIPT}" "${INSTALL_DIR}/${PYTHON_SCRIPT}"
+    if [[ -n "${SCRIPT_DIR}" && -f "${SCRIPT_DIR}/${PYTHON_SCRIPT}" ]]; then
+        cp "${SCRIPT_DIR}/${PYTHON_SCRIPT}" "${INSTALL_DIR}/${PYTHON_SCRIPT}"
+    else
+        info "Fetching ${PYTHON_SCRIPT} from ${RAW_BASE}..."
+        curl -fsSL "${RAW_BASE}/${PYTHON_SCRIPT}" -o "${INSTALL_DIR}/${PYTHON_SCRIPT}" \
+            || error "Failed to download ${PYTHON_SCRIPT}"
+    fi
     chmod +x "${INSTALL_DIR}/${PYTHON_SCRIPT}"
 
     success "Script installed to ${INSTALL_DIR}"
@@ -193,24 +197,6 @@ check_path() {
         echo "Then reload your shell or run: source ~/.bashrc"
         echo ""
     fi
-}
-
-# =============================================================================
-# Post-install setup
-# =============================================================================
-
-initial_setup() {
-    info "Running initial setup..."
-
-    # Activate venv and run the script in non-interactive mode for initial download
-    source "${VENV_DIR}/bin/activate"
-
-    # Just verify the script runs (will do full setup on first interactive run)
-    if python3 -c "import sys; sys.path.insert(0, '${INSTALL_DIR}'); exec(open('${INSTALL_DIR}/${PYTHON_SCRIPT}').read().split('if __name__')[0])" 2>/dev/null; then
-        success "Script verified successfully"
-    fi
-
-    deactivate
 }
 
 print_summary() {

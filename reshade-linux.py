@@ -157,9 +157,6 @@ class GameInfo:
         if self.install_path is None:
             self.install_path = self.path
 
-    def __str__(self) -> str:
-        return f"{self.name} ({self.detected_api.upper()}, {self.architecture}-bit)"
-
     def to_dict(self) -> dict:
         """Serialize for JSON storage."""
         return {
@@ -350,7 +347,7 @@ def analyze_executable(exe_path: Path) -> tuple[int, str, str]:
         pe.close()
 
     except Exception:
-        # Fallback: check PE header manually for architecture
+        # Fallback: PE header gives us architecture only; leave api/dll at defaults
         try:
             with open(exe_path, "rb") as f:
                 f.seek(0x3C)
@@ -359,7 +356,6 @@ def analyze_executable(exe_path: Path) -> tuple[int, str, str]:
                 machine = struct.unpack("<H", f.read(2))[0]
                 if machine == 0x14C:  # IMAGE_FILE_MACHINE_I386
                     arch = 32
-                    dll = "d3d9"
         except Exception:
             pass
 
@@ -654,13 +650,15 @@ class ReShadeInstaller:
                     if item.is_symlink():
                         item.unlink()
 
-        seen_files: set[str] = set()
+        seen_shaders: set[str] = set()
+        seen_textures: set[str] = set()
 
         def link_file(source: Path, target_dir: Path) -> bool:
-            """Link a file if not already seen."""
-            if source.name in seen_files:
+            """Link a file if not already seen in its own namespace."""
+            seen = seen_shaders if target_dir is merged_shaders else seen_textures
+            if source.name in seen:
                 return False
-            seen_files.add(source.name)
+            seen.add(source.name)
             target = target_dir / source.name
             if not target.exists():
                 target.symlink_to(source.resolve())
@@ -674,14 +672,14 @@ class ReShadeInstaller:
 
             for shaders_dir in repo_dir.rglob("Shaders"):
                 if shaders_dir.is_dir():
-                    for shader_file in shaders_dir.iterdir():
-                        if shader_file.is_file():
+                    for shader_file in shaders_dir.rglob("*"):
+                        if shader_file.is_file() and shader_file.suffix.lower() in SHADER_EXTENSIONS:
                             link_file(shader_file, merged_shaders)
 
             for textures_dir in repo_dir.rglob("Textures"):
                 if textures_dir.is_dir():
-                    for texture_file in textures_dir.iterdir():
-                        if texture_file.is_file():
+                    for texture_file in textures_dir.rglob("*"):
+                        if texture_file.is_file() and texture_file.suffix.lower() in TEXTURE_EXTENSIONS:
                             link_file(texture_file, merged_textures)
 
         # Merge from External_shaders directory
@@ -692,13 +690,13 @@ class ReShadeInstaller:
             ext_textures = external / "Textures"
 
             if ext_shaders.exists():
-                for f in ext_shaders.iterdir():
-                    if f.is_file():
+                for f in ext_shaders.rglob("*"):
+                    if f.is_file() and f.suffix.lower() in SHADER_EXTENSIONS:
                         link_file(f, merged_shaders)
 
             if ext_textures.exists():
-                for f in ext_textures.iterdir():
-                    if f.is_file():
+                for f in ext_textures.rglob("*"):
+                    if f.is_file() and f.suffix.lower() in TEXTURE_EXTENSIONS:
                         link_file(f, merged_textures)
 
             # Loose files in External_shaders root
@@ -711,7 +709,7 @@ class ReShadeInstaller:
                 elif suffix in TEXTURE_EXTENSIONS:
                     link_file(item, merged_textures)
 
-        console.print(f"[green]Merged {len(seen_files)} shader/texture files[/]")
+        console.print(f"[green]Merged {len(seen_shaders)} shaders, {len(seen_textures)} textures[/]")
 
     def create_reshade_ini(self) -> None:
         """Create default ReShade.ini configuration."""
@@ -877,7 +875,7 @@ def display_banner() -> None:
     ))
 
 
-def ask_select(message: str, choices: list, allow_none: bool = True):
+def ask_select(message: str, choices: list):
     """Wrapper for questionary select with consistent styling."""
     return questionary.select(message, choices=choices, style=QUESTIONARY_STYLE).ask()
 
@@ -1058,28 +1056,34 @@ def main_menu(installer: ReShadeInstaller) -> Optional[str]:
     return ask_select("What would you like to do?", choices)
 
 
-def run_install_flow(installer: ReShadeInstaller) -> None:
-    """Run the installation flow."""
+def discover_game(installer: ReShadeInstaller) -> Optional[GameInfo]:
+    """Scan Steam, let the user pick or browse, return an analyzed GameInfo."""
     console.print("\n[bold cyan]Scanning for Steam games...[/]")
     games = installer.steam_scanner.scan_for_games()
     console.print(f"[green]Found {len(games)} games[/]\n")
 
     selection = select_game(games)
-
     if selection is None:
-        return
-    elif selection == "manual":
+        return None
+    if selection == "manual":
         game = browse_for_game()
         if not game:
-            return
+            return None
     else:
         game = selection
 
-    # Analyze executable
-    game = select_exe_for_analysis(game, installer)
+    return select_exe_for_analysis(game, installer)
 
-    # Confirm/change DLL override
-    if not ask_confirm(f"Use {game.dll_override}.dll as override?", default=True):
+
+def run_install_flow(installer: ReShadeInstaller) -> None:
+    """Run the installation flow."""
+    game = discover_game(installer)
+    if game is None:
+        return
+
+    # Only ask for manual override if we couldn't analyze an executable
+    if not game.selected_exe:
+        console.print("[yellow]Could not auto-detect graphics API — please select DLL override.[/]")
         game = configure_dll_override(game)
 
     # Install
@@ -1140,32 +1144,36 @@ def run_reinstall_flow(installer: ReShadeInstaller) -> None:
 
 
 def run_uninstall_flow(installer: ReShadeInstaller) -> None:
-    """Run the uninstallation flow."""
-    console.print("\n[bold cyan]Scanning for games...[/]")
-    games = installer.steam_scanner.scan_for_games()
+    """Uninstall ReShade — only from games this tool previously installed to."""
+    saved_games = installer.games_config.list_all()
 
-    selection = select_game(games)
-
-    if selection is None:
+    if not saved_games:
+        console.print("[yellow]No ReShade installations found.[/]")
+        console.print("[dim]This tool only tracks games it installed ReShade to.[/]")
         return
-    elif selection == "manual":
-        game = browse_for_game()
-        if not game:
-            return
+
+    choices = [
+        questionary.Choice(title=f"{g.name}  [dim]{g.install_path}[/]", value=g)
+        for g in saved_games
+    ]
+    choices.append(questionary.Choice(title="[Cancel]", value=None))
+
+    game = ask_select("Select an installation to remove:", choices)
+    if game is None:
+        return
+
+    if not ask_confirm(f"Uninstall ReShade from {game.install_path}?"):
+        return
+
+    removed = installer.uninstall_from_game(game.install_path)
+    if removed:
+        console.print(f"[green]Removed: {', '.join(removed)}[/]")
+        installer.games_config.remove(game.path)
     else:
-        game = selection
+        console.print("[yellow]No ReShade files found to remove[/]")
+        installer.games_config.remove(game.path)
 
-    game = select_exe_for_analysis(game, installer)
-
-    if ask_confirm(f"Uninstall ReShade from {game.install_path}?"):
-        removed = installer.uninstall_from_game(game.install_path)
-        if removed:
-            console.print(f"[green]Removed: {', '.join(removed)}[/]")
-            installer.games_config.remove(game.path)
-        else:
-            console.print("[yellow]No ReShade files found to remove[/]")
-
-        console.print("\n[yellow]Remember to remove the WINEDLLOVERRIDES from Steam launch options![/]")
+    console.print("\n[yellow]Remember to remove WINEDLLOVERRIDES from Steam launch options![/]")
 
 
 def run_settings_menu(installer: ReShadeInstaller) -> None:
