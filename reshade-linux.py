@@ -28,7 +28,16 @@ from typing import Optional
 # Constants
 # =============================================================================
 
-RESHADE_URLS = ("https://reshade.me", "http://static.reshade.me")
+RESHADE_URL = "https://reshade.me"
+RESHADE_SETUP_PATH = "/downloads/ReShade_Setup_{version}.exe"
+SETUP_LINK_RE = re.compile(r"/downloads/ReShade_Setup_(\d+\.\d+\.\d+)\.exe")
+GITHUB_TAGS_URL = "https://api.github.com/repos/crosire/reshade/tags"
+GITHUB_TAGS_PER_PAGE = 100  # API maximum, so the newest releases fit in one page
+VERSION_LIST_LIMIT = 5
+ADDON_SUFFIX = "_Addon"
+SEMVER_RE = re.compile(r"^v?(\d+)\.(\d+)\.(\d+)$")
+HTTP_TIMEOUT = 15
+CANCEL_TITLE = "[Cancel]"
 
 SHADER_REPOS: list[tuple[str, str, Optional[str]]] = [
     ("https://github.com/crosire/reshade-shaders", "reshade-shaders", "slim"),
@@ -118,6 +127,7 @@ import questionary
 import requests
 from questionary import Style
 from rich import box
+from rich.align import Align
 from rich.console import Console
 from rich.panel import Panel
 from rich.progress import BarColumn, Progress, SpinnerColumn, TaskProgressColumn, TextColumn
@@ -187,7 +197,6 @@ class GameInfo:
 class Config:
     """Application configuration."""
     main_path: Path = field(default_factory=lambda: Path.home() / ".local/reshade")
-    reshade_version: str = "latest"
     addon_support: bool = True
     merge_shaders: bool = True
     global_ini: str = "ReShade.ini"
@@ -195,6 +204,14 @@ class Config:
     @property
     def reshade_path(self) -> Path:
         return self.main_path / "reshade"
+
+    @property
+    def latest_link(self) -> Path:
+        return self.reshade_path / "latest"
+
+    @property
+    def active_version_path(self) -> Path:
+        return self.main_path / "LVERS"
 
     @property
     def shaders_path(self) -> Path:
@@ -298,6 +315,14 @@ def safe_unlink(path: Path) -> bool:
         path.unlink()
         return True
     return False
+
+
+def semver_key(version: str) -> tuple[int, ...]:
+    """Sort key for X.Y.Z version strings, with or without a leading v."""
+    match = SEMVER_RE.match(version)
+    if not match:
+        raise ValueError(f"Not a release version: {version}")
+    return tuple(int(part) for part in match.groups())
 
 
 # =============================================================================
@@ -481,28 +506,56 @@ class ReShadeInstaller:
         for directory in directories:
             directory.mkdir(parents=True, exist_ok=True)
 
-    def get_latest_reshade_version(self) -> tuple[str, str]:
-        """Fetch the latest ReShade version and download URL."""
-        pattern_suffix = r"_Addon" if self.config.addon_support else ""
-        pattern = rf"/downloads/ReShade_Setup_([0-9.]+{pattern_suffix})\.exe"
+    def get_latest_release(self) -> str:
+        """Latest release advertised on reshade.me, as bare X.Y.Z."""
+        response = self.session.get(RESHADE_URL, timeout=HTTP_TIMEOUT)
+        response.raise_for_status()
+        match = SETUP_LINK_RE.search(response.text)
+        if not match:
+            raise RuntimeError("No ReShade download link found on reshade.me")
+        return match.group(1)
 
-        for base_url in RESHADE_URLS:
-            try:
-                response = self.session.get(base_url, timeout=15)
-                response.raise_for_status()
+    @staticmethod
+    def download_url(version: str) -> str:
+        """Setup executable URL for a full version name such as 6.8.0_Addon."""
+        return RESHADE_URL + RESHADE_SETUP_PATH.format(version=version)
 
-                match = re.search(pattern, response.text)
-                if match:
-                    version = match.group(1)
-                    download_url = f"{base_url}/downloads/ReShade_Setup_{version}.exe"
-                    return version, download_url
+    def full_version(self, release: str) -> str:
+        """Version directory name for a release under the current addon setting."""
+        return release + ADDON_SUFFIX if self.config.addon_support else release
 
-            except requests.RequestException:
+    def list_releases(self) -> list[str]:
+        """Newest releases from reshade.me and the crosire/reshade tags, capped at VERSION_LIST_LIMIT."""
+        releases: set[str] = set()
+        try:
+            releases.add(self.get_latest_release())
+        except Exception as e:
+            console.print(f"[yellow]reshade.me unavailable: {e}[/]")
+        try:
+            response = self.session.get(
+                GITHUB_TAGS_URL, params={"per_page": GITHUB_TAGS_PER_PAGE}, timeout=HTTP_TIMEOUT
+            )
+            response.raise_for_status()
+            tags = [tag["name"] for tag in response.json()]
+            releases.update(tag.lstrip("v") for tag in tags if SEMVER_RE.match(tag))
+        except Exception as e:
+            console.print(f"[yellow]GitHub release list unavailable: {e}[/]")
+        return sorted(releases, key=semver_key, reverse=True)[:VERSION_LIST_LIMIT]
+
+    def list_downloaded_releases(self) -> list[str]:
+        """Downloaded releases matching the current addon setting, newest first."""
+        releases = []
+        for path in self.config.reshade_path.iterdir():
+            if path.is_symlink() or not (path / "ReShade64.dll").exists():
                 continue
+            if path.name.endswith(ADDON_SUFFIX) != self.config.addon_support:
+                continue
+            release = path.name.removesuffix(ADDON_SUFFIX)
+            if SEMVER_RE.match(release):
+                releases.append(release)
+        return sorted(releases, key=semver_key, reverse=True)
 
-        raise RuntimeError("Failed to fetch ReShade version from any source")
-
-    def download_reshade(self, version: str, url: str) -> None:
+    def download_reshade(self, version: str) -> None:
         """Download and extract ReShade."""
         version_path = self.config.reshade_path / version
 
@@ -522,7 +575,8 @@ class ReShadeInstaller:
             ) as progress:
                 task = progress.add_task("Download", total=100)
 
-                response = self.session.get(url, stream=True)
+                response = self.session.get(self.download_url(version), stream=True)
+                response.raise_for_status()
                 total = int(response.headers.get("content-length", 0))
 
                 with open(exe_path, "wb") as f:
@@ -543,13 +597,14 @@ class ReShadeInstaller:
             if result.returncode != 0:
                 raise RuntimeError(f"Failed to extract ReShade: {result.stderr.decode()}")
 
-        # Update latest symlink
-        latest_link = self.config.reshade_path / "latest"
-        safe_unlink(latest_link)
-        latest_link.symlink_to(version_path)
-
-        # Save version info
-        (self.config.main_path / "LVERS").write_text(version)
+    def activate_version(self, version: str) -> bool:
+        """Download a version if needed and point latest plus LVERS at it. True if it changed."""
+        previous = self.get_active_version()
+        self.download_reshade(version)
+        safe_unlink(self.config.latest_link)
+        self.config.latest_link.symlink_to(self.config.reshade_path / version)
+        self.config.active_version_path.write_text(version)
+        return previous != version
 
     def download_d3dcompiler(self, arch: int) -> None:
         """Download d3dcompiler_47.dll from Firefox installer."""
@@ -796,18 +851,14 @@ WindowRounding=0.000000
 """
         ini_path.write_text(ini_content)
 
-    def get_current_version(self) -> str:
-        """Get the current ReShade version string."""
-        version = self.config.reshade_version
-        if version == "latest":
-            lvers_path = self.config.main_path / "LVERS"
-            if lvers_path.exists():
-                version = lvers_path.read_text().strip()
-        return version
+    def get_active_version(self) -> str:
+        """Active ReShade version directory name, or latest when LVERS is missing."""
+        path = self.config.active_version_path
+        return path.read_text().strip() if path.exists() else "latest"
 
     def install_to_game(self, game: GameInfo) -> str:
         """Install ReShade to a game directory."""
-        version = self.get_current_version()
+        version = self.get_active_version()
         reshade_dll = self.config.reshade_path / version / f"ReShade{game.architecture}.dll"
 
         if not reshade_dll.exists():
@@ -861,23 +912,27 @@ WindowRounding=0.000000
 
 def display_banner() -> None:
     """Display application banner."""
-    banner = """
+    banner = r"""
  ____      ____  _               _        _     _
-|  _ \\ ___/ ___|| |__   __ _  __| | ___  | |   (_)_ __  _   ___  __
-| |_) / _ \\___ \\| '_ \\ / _` |/ _` |/ _ \\ | |   | | '_ \\| | | \\ \\/ /
+|  _ \ ___/ ___|| |__   __ _  __| | ___  | |   (_)_ __  _   ___  __
+| |_) / _ \___ \| '_ \ / _` |/ _` |/ _ \ | |   | | '_ \| | | \ \/ /
 |  _ <  __/___) | | | | (_| | (_| |  __/ | |___| | | | | |_| |>  <
-|_| \\_\\___|____/|_| |_|\\__,_|\\__,_|\\___| |_____|_|_| |_|\\__,_/_/\\_\\"""
+|_| \_\___|____/|_| |_|\__,_|\__,_|\___| |_____|_|_| |_|\__,_/_/\_\
+""".strip("\n")
 
     console.print(Panel(
-        Text(banner, style="bold cyan", justify="center"),
+        Align.center(Text(banner, style="bold cyan")),
         subtitle="[dim]Modern ReShade installer for Linux[/]",
         box=box.DOUBLE,
     ))
 
 
-def ask_select(message: str, choices: list):
-    """Wrapper for questionary select with consistent styling."""
-    return questionary.select(message, choices=choices, style=QUESTIONARY_STYLE).ask()
+def ask_select(message: str, choices: list, default=None):
+    """Wrapper for questionary select with consistent styling. Cancel entries yield None."""
+    result = questionary.select(
+        message, choices=choices, default=default, style=QUESTIONARY_STYLE
+    ).ask()
+    return None if result == CANCEL_TITLE else result
 
 
 def ask_confirm(message: str, default: bool = True) -> bool:
@@ -905,7 +960,7 @@ def select_game(games: list[GameInfo]) -> Optional[GameInfo | str]:
         questionary.Choice(title=g.name, value=g) for g in games
     ]
     choices.append(questionary.Choice(title="[Browse manually...]", value="manual"))
-    choices.append(questionary.Choice(title="[Cancel]", value=None))
+    choices.append(questionary.Choice(title=CANCEL_TITLE))
 
     return ask_select("Select a game:", choices)
 
@@ -1039,7 +1094,9 @@ def main_menu(installer: ReShadeInstaller) -> Optional[str]:
         questionary.Choice("Install ReShade to a game", value="install"),
         questionary.Choice("Uninstall ReShade from a game", value="uninstall"),
         questionary.Choice("Update shaders", value="update_shaders"),
-        questionary.Choice("Update ReShade", value="update_reshade"),
+        questionary.Choice(
+            f"Change or update ReShade version ({installer.get_active_version()})", value="version"
+        ),
     ]
 
     if saved_games:
@@ -1127,7 +1184,7 @@ def run_reinstall_flow(installer: ReShadeInstaller) -> None:
         )
         for g in saved_games
     ]
-    choices.append(questionary.Choice(title="[Cancel]", value=None))
+    choices.append(questionary.Choice(title=CANCEL_TITLE))
 
     game = ask_select("Select a saved game to reinstall:", choices)
 
@@ -1153,10 +1210,10 @@ def run_uninstall_flow(installer: ReShadeInstaller) -> None:
         return
 
     choices = [
-        questionary.Choice(title=f"{g.name}  [dim]{g.install_path}[/]", value=g)
+        questionary.Choice(title=f"{g.name}  ({g.install_path})", value=g)
         for g in saved_games
     ]
-    choices.append(questionary.Choice(title="[Cancel]", value=None))
+    choices.append(questionary.Choice(title=CANCEL_TITLE))
 
     game = ask_select("Select an installation to remove:", choices)
     if game is None:
@@ -1176,13 +1233,66 @@ def run_uninstall_flow(installer: ReShadeInstaller) -> None:
     console.print("\n[yellow]Remember to remove WINEDLLOVERRIDES from Steam launch options![/]")
 
 
+def reinstall_saved_games(installer: ReShadeInstaller) -> None:
+    """Relink every saved game to the active ReShade version."""
+    version = installer.get_active_version()
+    for game in installer.games_config.list_all():
+        try:
+            dll_used = installer.install_to_game(game)
+            console.print(f"[green]{game.name}: {dll_used}.dll -> ReShade {version}[/]")
+        except Exception as e:
+            console.print(f"[red]{game.name}: {e}[/]")
+
+
+def run_version_menu(installer: ReShadeInstaller) -> None:
+    """Pick the active ReShade version from recent releases and downloaded ones."""
+    active = installer.get_active_version()
+    releases = installer.list_releases()
+    downloaded = installer.list_downloaded_releases()
+    candidates = sorted(set(releases) | set(downloaded), key=semver_key, reverse=True)
+    if not candidates:
+        console.print("[red]No ReShade versions available[/]")
+        return
+
+    choices = []
+    default = None
+    for release in candidates:
+        tags = []
+        if releases and release == releases[0]:
+            tags.append("latest")
+        if installer.full_version(release) == active:
+            tags.append("active")
+            default = release
+        elif release in downloaded:
+            tags.append("downloaded")
+        title = f"{release}  ({', '.join(tags)})" if tags else release
+        choices.append(questionary.Choice(title=title, value=release))
+    choices.append(questionary.Choice(title=CANCEL_TITLE))
+
+    release = ask_select(f"Select ReShade version (active: {active}):", choices, default=default)
+    if not release:
+        return
+
+    version = installer.full_version(release)
+    try:
+        changed = installer.activate_version(version)
+    except Exception as e:
+        console.print(f"[bold red]Failed to switch to ReShade {version}: {e}[/]")
+        return
+    if not changed:
+        console.print(f"[green]ReShade {version} is already active[/]")
+        return
+    console.print(f"[green]Active ReShade version: {version}[/]")
+    reinstall_saved_games(installer)
+
+
 def run_settings_menu(installer: ReShadeInstaller) -> None:
     """Settings configuration menu."""
     while True:
         console.print(f"""
 [bold cyan]Current Settings:[/]
   Main path: {installer.config.main_path}
-  ReShade version: {installer.config.reshade_version}
+  ReShade version: {installer.get_active_version()}
   Addon support: {installer.config.addon_support}
   Merge shaders: {installer.config.merge_shaders}
   Saved games: {len(installer.games_config.list_all())}
@@ -1214,15 +1324,15 @@ def run_settings_menu(installer: ReShadeInstaller) -> None:
 
 def initial_setup(installer: ReShadeInstaller) -> bool:
     """Run initial setup if needed. Returns False if setup fails."""
-    reshade_dll = installer.config.reshade_path / "latest" / "ReShade64.dll"
+    reshade_dll = installer.config.latest_link / "ReShade64.dll"
 
     if not reshade_dll.exists():
         console.print("\n[cyan]First run detected. Setting up ReShade...[/]\n")
 
         try:
-            version, url = installer.get_latest_reshade_version()
+            version = installer.full_version(installer.get_latest_release())
             console.print(f"[green]Latest ReShade version: {version}[/]")
-            installer.download_reshade(version, url)
+            installer.activate_version(version)
         except Exception as e:
             console.print(f"[red]Failed to download ReShade: {e}[/]")
             return False
@@ -1264,14 +1374,8 @@ def main() -> None:
             repos = select_shader_repos()
             if repos:
                 installer.download_all_shaders(repos)
-        elif action == "update_reshade":
-            try:
-                version, url = installer.get_latest_reshade_version()
-                console.print(f"[cyan]Downloading ReShade {version}...[/]")
-                installer.download_reshade(version, url)
-                console.print(f"[green]ReShade updated to {version}[/]")
-            except Exception as e:
-                console.print(f"[red]Update failed: {e}[/]")
+        elif action == "version":
+            run_version_menu(installer)
         elif action == "settings":
             run_settings_menu(installer)
         elif action == "exit" or action is None:

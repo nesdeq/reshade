@@ -74,8 +74,14 @@ ReShade injects a DLL into the game process. Kernel-mode anti-cheats (EAC, Battl
 ### Will this break my game or overwrite files?
 No. All files are symlinks. Uninstall restores the original state. Save files are never touched.
 
+### How do I update this tool?
+Run the install one-liner again. It refreshes the script and its Python environment and leaves your downloaded ReShade versions, shaders, config and saved games untouched.
+
 ### How do I update ReShade or shaders later?
-Run `reshade` → **Update ReShade** or **Update shaders**.
+Run `reshade` → **Change or update ReShade version** and pick the entry tagged `latest`, or **Update shaders**. Nothing updates on its own.
+
+### How do I use an older ReShade version?
+Same menu entry: pick one of the last five releases (or any version already downloaded). Every saved game is relinked to whatever you pick, and the entry shows the active version.
 
 ### Where are the shaders stored?
 `~/.local/reshade/ReShade_shaders/`. Merged into `Merged/` and symlinked into each game directory — so editing a shader once updates every game.
